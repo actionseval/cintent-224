@@ -43,7 +43,7 @@ jobs:
           #   cmd: yapf . -drp
           - task: Test
             cmd: pytest
-            python-version: ['3.11']
+            python-version: '3.11'
     steps:
       - uses: actions/checkout@v4
 
