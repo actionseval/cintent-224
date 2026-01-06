@@ -1,0 +1,226 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for compiler_opt.rl.trainer."""
+
+# pylint: disable=protected-access
+
+import tensorflow as tf
+from tf_agents.agents.behavioral_cloning import behavioral_cloning_agent
+from tf_agents.networks import q_network
+from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step
+from tf_agents.trajectories import trajectory
+from unittest import mock
+
+from compiler_opt.rl import trainer
+
+
+def _create_test_data(batch_size, sequence_length):
+  # Use the value zero, which signals the beginning of a sequence, which
+  # allows us to test the num_trajectories metric.
+  test_trajectory = trajectory.Trajectory(
+      step_type=tf.fill([batch_size, sequence_length], 0),
+      observation={
+          'callee_users':
+              tf.fill([batch_size, sequence_length],
+                      tf.constant(10, dtype=tf.int64))
+      },
+      action=tf.fill([batch_size, sequence_length],
+                     tf.constant(1, dtype=tf.int64)),
+      policy_info=(),
+      next_step_type=tf.fill([batch_size, sequence_length], 1),
+      reward=tf.fill([batch_size, sequence_length], 2.0),
+      discount=tf.fill([batch_size, sequence_length], 1.0),
+  )
+
+  def test_data_iterator():
+    while True:
+      yield test_trajectory
+
+  return test_data_iterator()
+
+
+class TrainerTest(tf.test.TestCase):
+
+  def setUp(self):
+    observation_spec = {
+        'callee_users':
+            tf.TensorSpec(dtype=tf.int64, shape=(), name='callee_users')
+    }
+    self._time_step_spec = time_step.time_step_spec(observation_spec)
+    self._action_spec = tensor_spec.BoundedTensorSpec(
+        dtype=tf.int64,
+        shape=(),
+        minimum=0,
+        maximum=1,
+        name='inlining_decision')
+    self._network = q_network.QNetwork(
+        input_tensor_spec=self._time_step_spec.observation,
+        action_spec=self._action_spec,
+        preprocessing_layers={
+            'callee_users': tf.keras.layers.Lambda(lambda x: x)
+        })
+    super().setUp()
+
+  def test_trainer_initialization(self):
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdamOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(), agent=test_agent)
+    self.assertEqual(0, test_trainer._global_step.numpy())
+
+  def test_training(self):
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdamOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(),
+        agent=test_agent,
+        summary_log_interval=1,
+        summary_export_interval=10)
+    self.assertEqual(0, test_trainer._global_step.numpy())
+
+    dataset_iter = _create_test_data(batch_size=3, sequence_length=3)
+    monitor_dict = {'default': {'test': 1}}
+
+    with mock.patch.object(
+        tf.summary, 'scalar', autospec=True) as mock_scalar_summary:
+      test_trainer.train(dataset_iter, monitor_dict, num_iterations=100)
+      self.assertEqual(
+          10,
+          sum(1 for c in mock_scalar_summary.mock_calls
+              if c[2]['name'] == 'test'))
+      self.assertEqual(100, test_trainer._global_step.numpy())
+      self.assertEqual(100, test_trainer.global_step_numpy())
+
+  def test_training_with_multiple_times(self):
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdamOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(), agent=test_agent)
+    self.assertEqual(0, test_trainer._global_step.numpy())
+
+    dataset_iter = _create_test_data(batch_size=3, sequence_length=3)
+    monitor_dict = {'default': {'test': 1}}
+    test_trainer.train(dataset_iter, monitor_dict, num_iterations=10)
+    self.assertEqual(10, test_trainer._global_step.numpy())
+
+    dataset_iter = _create_test_data(batch_size=6, sequence_length=4)
+    test_trainer.train(dataset_iter, monitor_dict, num_iterations=10)
+    self.assertEqual(20, test_trainer._global_step.numpy())
+
+  def test_training_metrics(self):
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdadeltaOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(), agent=test_agent, summary_log_interval=1)
+    self.assertEqual(0, test_trainer._data_action_mean.result().numpy())
+    self.assertEqual(0, test_trainer._data_reward_mean.result().numpy())
+    self.assertEqual(0, test_trainer._num_trajectories.result().numpy())
+
+    dataset_iter = _create_test_data(batch_size=3, sequence_length=3)
+    monitor_dict = {'default': {'test': 1}}
+    test_trainer.train(dataset_iter, monitor_dict, num_iterations=10)
+
+    self.assertEqual(1, test_trainer._data_action_mean.result().numpy())
+    self.assertEqual(2, test_trainer._data_reward_mean.result().numpy())
+    self.assertEqual(90, test_trainer._num_trajectories.result().numpy())
+
+  def test_training_metrics_bc(self):
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdamOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(),
+        agent=test_agent,
+        summary_log_interval=1,
+        bc_percentage_correct=True)
+
+    dataset_iter = _create_test_data(batch_size=3, sequence_length=3)
+    monitor_dict = {'default': {'test': 1}}
+    test_trainer.train(dataset_iter, monitor_dict, num_iterations=10)
+
+    self.assertLess(0.1, test_trainer._percentage_correct.result().numpy())
+
+  def test_inference(self):
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdamOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(), agent=test_agent)
+
+    inference_batch_size = 1
+    random_time_step = tensor_spec.sample_spec_nest(
+        self._time_step_spec, outer_dims=(inference_batch_size,))
+
+    initial_policy_state = test_trainer._agent.policy.get_initial_state(
+        inference_batch_size)
+
+    action_outputs = test_trainer._agent.policy.action(random_time_step,
+                                                       initial_policy_state)
+    self.assertAllEqual([inference_batch_size], action_outputs.action.shape)
+
+    action_outputs = test_trainer._agent.policy.action(random_time_step,
+                                                       action_outputs.state)
+    self.assertAllEqual([inference_batch_size], action_outputs.action.shape)
+
+  def test_hooks(self):
+    test_hook_invocations = []
+
+    def test_hook_fn():
+      test_hook_invocations.append(len(test_hook_invocations))
+
+    test_agent = behavioral_cloning_agent.BehavioralCloningAgent(
+        self._time_step_spec,
+        self._action_spec,
+        self._network,
+        tf.compat.v1.train.AdamOptimizer(),
+        num_outer_dims=2)
+    test_trainer = trainer.Trainer(
+        root_dir=self.get_temp_dir(), agent=test_agent, summary_log_interval=1)
+
+    dataset_iter = _create_test_data(batch_size=3, sequence_length=3)
+    monitor_dict = {'default': {'test': 1}}
+    test_trainer.train(
+        dataset_iter,
+        monitor_dict,
+        num_iterations=10,
+        hooks=[(5, test_hook_fn)])
+
+    self.assertSequenceEqual(test_hook_invocations, [0, 1])
+
+
+if __name__ == '__main__':
+  tf.test.main()

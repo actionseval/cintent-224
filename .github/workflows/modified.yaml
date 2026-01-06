@@ -1,0 +1,76 @@
+# This is a basic workflow to help you get started with Actions
+
+name: MLGO CI
+
+permissions:
+  contents: read
+
+# CINTENT >> MANUAL TRIGGER
+# on:
+#   push:
+#     branches:
+#       - 'main'
+#   repository_dispatch:
+#   pull_request:
+on: [repository_dispatch, workflow_dispatch]
+
+jobs:
+  # CINTENT >> NO_TRACEE
+  # LicenseCheck:
+  #   runs-on: ubuntu-22.04
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: ./check-license.sh
+  
+  Checks:
+    # CINTENT >> CHANGE_VERSION
+    # runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # CINTENT >> REMOVE_MATRIX 
+        # python-version: ['3.10', '3.11']
+        # task: [Typecheck, Lint, Ruff, Yapf, Test]
+        include:
+          # CINTENT >> REMOVE_MATRIX
+          # - task: Typecheck
+          #   cmd: pytype -j auto .
+          # - task: Lint
+          #   cmd: pylint --rcfile .pylintrc --recursive yes .
+          # - task: Ruff
+          #   cmd: ruff check
+          # - task: Yapf
+          #   cmd: yapf . -drp
+          - task: Test
+            cmd: pytest
+            python-version: ['3.11']
+    steps:
+      - uses: actions/checkout@v4
+
+      # CINTENT >> INSERT_CINTENT
+      - uses: JavidDitty/setup-cintent@a606c80c34ec190c6a20dea33d6d58ddb6c4e0cc
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # CINTENT >> REMOVE_CACHE
+          # cache: 'pipenv'
+          # cache-dependency-path: Pipfile.lock
+          
+      - name: Install Pipenv
+        run: pip3 install pipenv
+
+      - name: Install Python Dependencies
+        run: pipenv sync --categories="packages dev-packages ci" --verbose
+
+      - name: ${{ matrix.task }}
+        run: pipenv run ${{ matrix.cmd }}
+
+      # CINTENT >> INSERT_CINTENT
+      - name: Upload CIntent Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ env.CINTENT_ARTIFACT_NAME }}
+          path: ${{ env.CINTENT_LOGS }}
